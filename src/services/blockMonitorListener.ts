@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { RpcManager } from '../loaders/rpc';
+import dotenv from 'dotenv';
 import { parseRanges, amountMatchesRanges } from './ranges.js';
 import { parseBlockTransactions } from './blockParser.js';
 import { log, error } from '../utils/logger.js';
@@ -32,21 +33,28 @@ async function saveLastSlot(map: Record<string, number>) {
 }
 
 function readCexConfigs(): CexConfig[] {
-  const configs: CexConfig[] = [];
+  try { dotenv.config(); } catch (e) {}
+    const map: Record<string, CexConfig> = {};
   const env = process.env;
   Object.keys(env).forEach((k) => {
     const m = k.match(/^CEX_(\d+)_LABEL$/);
     if (m) {
       const n = m[1];
-      const label = env[`CEX_${n}_LABEL`];
-      const address = env[`CEX_${n}_ADDRESS`];
-      const ranges = env[`CEX_${n}_RANGE`];
+      const rawLabel = env[`CEX_${n}_LABEL`];
+      const rawAddress = env[`CEX_${n}_ADDRESS`];
+      const rawRanges = env[`CEX_${n}_RANGE`];
+      const label = rawLabel ? String(rawLabel).trim() : '';
+      const address = rawAddress ? String(rawAddress).trim() : '';
+      const ranges = rawRanges ? String(rawRanges).trim() : '';
       if (label && address) {
-        configs.push({ label, address, ranges: ranges ?? '' });
+          map[n] = { label: String(label).trim(), address: String(address).trim(), ranges: (ranges ?? '').toString().trim() };
+      } else {
+        if (!label && address) log(`CEX_${n} has address but no label; skipping`);
+        if (label && !address) log(`CEX_${n} has label but no address; skipping`);
       }
     }
   });
-  return configs;
+    return Object.keys(map).sort((a, b) => Number(a) - Number(b)).map((k) => map[k]);
 }
 
 export async function startBlockMonitorListener(rpc: RpcManager) {
@@ -54,7 +62,19 @@ export async function startBlockMonitorListener(rpc: RpcManager) {
   const lastSlots = await loadLastSlot();
   const configs = readCexConfigs();
 
-  log('🔄 Starting listener-based block monitor for', configs.map((c) => `${c.label}:${c.address}`).join(', '));
+  if (configs.length === 0) {
+    log('🔄 Starting listener-based block monitor — no CEX wallets configured (no CEX_N_LABEL/CEX_N_ADDRESS pairs found)');
+  } else {
+    log('🔄 Starting listener-based block monitor for', configs.map((c) => `${c.label}:${c.address}`).join(', '));
+    for (const cfg of configs) {
+      try {
+        const parsedRanges = parseRanges(cfg.ranges);
+        log(`🔎 Registered CEX -> label=${cfg.label} address=${cfg.address} ranges='${cfg.ranges}' parsed=${JSON.stringify(parsedRanges)}`);
+      } catch (e) {
+        log(`🔎 Registered CEX -> label=${cfg.label} address=${cfg.address} ranges='${cfg.ranges}' parsed=[]`);
+      }
+    }
+  }
 
   const conn = rpc.getConnection();
   let lastSlot = 0;

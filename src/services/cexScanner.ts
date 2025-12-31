@@ -37,28 +37,50 @@ async function saveLastSignatures(map: Record<string, string>) {
 }
 
 function readCexConfigs(): CexConfig[] {
-  const configs: CexConfig[] = [];
+  // ensure .env loaded
+  try { dotenv.config(); } catch (e) {}
+  const map: Record<string, CexConfig> = {};
   const env = process.env;
   // find CEX_n_LABEL pairs
   Object.keys(env).forEach((k) => {
     const m = k.match(/^CEX_(\d+)_LABEL$/);
     if (m) {
       const n = m[1];
-      const label = env[`CEX_${n}_LABEL`];
-      const address = env[`CEX_${n}_ADDRESS`];
-      const ranges = env[`CEX_${n}_RANGE`];
+      const rawLabel = env[`CEX_${n}_LABEL`];
+      const rawAddress = env[`CEX_${n}_ADDRESS`];
+      const rawRanges = env[`CEX_${n}_RANGE`];
+      const label = rawLabel ? String(rawLabel).trim() : '';
+      const address = rawAddress ? String(rawAddress).trim() : '';
+      const ranges = rawRanges ? String(rawRanges).trim() : '';
       if (label && address) {
-        configs.push({ label, address, ranges: ranges ?? '' });
+        map[n] = { label, address, ranges };
+      } else {
+        if (!label && address) log(`CEX_${n} has address but no label; skipping`);
+        if (label && !address) log(`CEX_${n} has label but no address; skipping`);
       }
     }
   });
-  return configs;
-}export async function startScanner(rpc: RpcManager) {
+  return Object.keys(map).sort((a, b) => Number(a) - Number(b)).map((k) => map[k]);
+}
+
+export async function startScanner(rpc: RpcManager) {
   await ensureDataDir();
   const last = await loadLastSignatures();
   const configs = readCexConfigs();
 
-  log('Starting scanner for', configs.map((c) => `${c.label}:${c.address}`).join(', '));
+  if (configs.length === 0) {
+    log('Starting scanner — no CEX wallets configured (no CEX_N_LABEL/CEX_N_ADDRESS pairs found)');
+  } else {
+    log('Starting scanner for', configs.map((c) => `${c.label}:${c.address}`).join(', '));
+    for (const cfg of configs) {
+      try {
+        const parsedRanges = parseRanges(cfg.ranges);
+        log(`🔎 Registered CEX -> label=${cfg.label} address=${cfg.address} ranges='${cfg.ranges}' parsed=${JSON.stringify(parsedRanges)}`);
+      } catch (e) {
+        log(`🔎 Registered CEX -> label=${cfg.label} address=${cfg.address} ranges='${cfg.ranges}' parsed=[]`);
+      }
+    }
+  }
 
   for (const cfg of configs) {
     (async () => {
