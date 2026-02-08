@@ -5,7 +5,6 @@ import { RpcManager } from '../loaders/rpc';
 import { parseRanges, amountMatchesRanges } from './ranges.js';
 import { parseBlockTransactions } from './blockParser.js';
 import { log, error } from '../utils/logger.js';
-import dotenv from 'dotenv';
 import { sendAlert } from '../utils/telegram.js';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -33,32 +32,32 @@ async function saveLastSlot(map: Record<string, number>) {
   await fs.writeFile(LAST_SLOT_FILE, JSON.stringify(map, null, 2), 'utf-8');
 }
 
+async function isLikelyDevWallet(conn: any, recipientAddress: string): Promise<boolean> {
+  try {
+    const sigs = await conn.getSignaturesForAddress(new PublicKey(recipientAddress), { limit: 3 });
+    const count = sigs?.length ?? 0;
+    return count <= 2;
+  } catch (err: any) {
+    return true;
+  }
+}
+
 function readCexConfigs(): CexConfig[] {
-  // ensure .env is loaded (safe to call multiple times)
-  try { dotenv.config(); } catch (e) {}
-  const map: Record<string, CexConfig> = {};
+  const configs: CexConfig[] = [];
   const env = process.env;
   Object.keys(env).forEach((k) => {
     const m = k.match(/^CEX_(\d+)_LABEL$/);
     if (m) {
       const n = m[1];
-      const rawLabel = env[`CEX_${n}_LABEL`];
-      const rawAddress = env[`CEX_${n}_ADDRESS`];
-      const rawRanges = env[`CEX_${n}_RANGE`];
-      const label = rawLabel ? String(rawLabel).trim() : '';
-      const address = rawAddress ? String(rawAddress).trim() : '';
-      const ranges = rawRanges ? String(rawRanges).trim() : '';
+      const label = env[`CEX_${n}_LABEL`];
+      const address = env[`CEX_${n}_ADDRESS`];
+      const ranges = env[`CEX_${n}_RANGE`];
       if (label && address) {
-        map[n] = { label, address, ranges };
-      } else {
-        if (!label && address) log(`CEX_${n} has address but no label; skipping`);
-        if (label && !address) log(`CEX_${n} has label but no address; skipping`);
+        configs.push({ label, address, ranges: ranges ?? '' });
       }
     }
   });
-  return Object.keys(map)
-    .sort((a, b) => Number(a) - Number(b))
-    .map((k) => map[k]);
+  return configs;
 }
 
 export async function startTransactionMonitorListener(rpc: RpcManager) {
@@ -66,20 +65,7 @@ export async function startTransactionMonitorListener(rpc: RpcManager) {
   const lastSlots = await loadLastSlot();
   const configs = readCexConfigs();
 
-  if (configs.length === 0) {
-    log('🚀 Starting V2 WebSocket-native transaction monitor — no CEX wallets configured (no CEX_N_LABEL/CEX_N_ADDRESS pairs found)');
-  } else {
-    log('🚀 Starting V2 WebSocket-native transaction monitor for', configs.map((c) => `${c.label}:${c.address}`).join(', '));
-    // Log detailed registration for each configured CEX
-    for (const cfg of configs) {
-      try {
-        const parsedRanges = parseRanges(cfg.ranges);
-        log(`🔎 Registered CEX -> label=${cfg.label} address=${cfg.address} ranges='${cfg.ranges}' parsed=${JSON.stringify(parsedRanges)}`);
-      } catch (e) {
-        log(`🔎 Registered CEX -> label=${cfg.label} address=${cfg.address} ranges='${cfg.ranges}' parsed=[]`);
-      }
-    }
-  }
+  log('🚀 Starting V2 WebSocket-native transaction monitor for', configs.map((c) => `${c.label}:${c.address}`).join(', '));
 
   const conn = rpc.getConnection();
   let lastSlot = 0;
@@ -184,7 +170,13 @@ export async function startTransactionMonitorListener(rpc: RpcManager) {
                   continue;
                 }
 
-                // Range match found - show full details
+                // Range match — check recipient activity before alert
+                if (!await isLikelyDevWallet(conn, outflow.receiver)) {
+                  log(`[${cfg.label}] ⏭️ Recipient ${outflow.receiver.slice(0, 8)}... has >2 signatures; skipping alert`);
+                  continue;
+                }
+
+                // Dev wallet confirmed, send alert
                 const solscanLink = `https://solscan.io/tx/${signature}`;
                 const message = `<b>🚨 Range Match Alert</b>\n<b>CEX:</b> ${cfg.label}\n<b>Amount:</b> ${outflow.amount} SOL\n<b>Receiver:</b> <code>${outflow.receiver}</code>\n<b>Tx:</b> <code>${signature}</code>\n\n<a href="${solscanLink}">View on Solscan</a>`;
                 log(`🚨 ALERT: ${cfg.label} sent ${outflow.amount} SOL to ${outflow.receiver}`);
